@@ -166,6 +166,16 @@ typedef struct sSignalDetector
 				center_power_highZ++;
 			}
 		center_power_high /= center_power_highZ;
+
+		float center_power_high_high = 0;
+		float center_power_high_highZ = 0;
+		for(int x = center_pos - center_width; x < center_pos + center_width; x++)
+			if(power_array[x] > center_power_high)
+			{
+				center_power_high_high += power_array[x];
+				center_power_high_highZ++;
+			}
+		center_power_high_high /= center_power_high_highZ;
 		
 		
 		float center_to_background = center_power_high - out_low_average;
@@ -193,9 +203,9 @@ typedef struct sSignalDetector
 		if(center_freq > standard_max_frequency_MHz*1000000.0)
 			freq_penalty_mult = standard_max_frequency_MHz*1000000.0 / center_freq;
 
-		float detected_normalized = freq_penalty_mult*detected_score / (10.0 + detected_score);
+		float detected_normalized = freq_penalty_mult*detected_score / (20.0 + detected_score);
 		
-		*res_power = center_power_high;
+		*res_power = center_power;
 		
 		float cur_level = power_array[left_pos];
 		int left_edge = left_pos;

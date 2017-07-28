@@ -356,7 +356,7 @@ void draw_charts(uint8_t *draw_pix, int w, int h)
 			((unsigned int*)draw_pix)[gy*w + x] = 0xFFFFFF;
 	}
 	
-	detector_chart->draw(draw_pix, w, h);
+//	detector_chart->draw(draw_pix, w, h);
 }
 
 
@@ -464,11 +464,11 @@ void init_detectors()
 	detectors[0].single_peak = 1;
 	detectors[0].standard_max_frequency_MHz = 99999;
 	detectors[0].standard_min_frequency_MHz = 0;
-	detectors[0].center_width_kHz = 2000;
-	detectors[0].left_shift_kHz = 6000;
-	detectors[0].left_width_kHz = 3000;
-	detectors[0].right_shift_kHz = 6000;
-	detectors[0].right_width_kHz = 3000;
+	detectors[0].center_width_kHz = 7000;
+	detectors[0].left_shift_kHz = 7000;
+	detectors[0].left_width_kHz = 2000;
+	detectors[0].right_shift_kHz = 7000;
+	detectors[0].right_width_kHz = 2000;
 	detectors[0].left_relative_power = 0.9;
 	detectors[0].right_relative_power = 0.9;
 }
@@ -504,6 +504,12 @@ void run_detectors()
 				full_detector_bw[sp_idx] = res_bw;
 			}
 //			printf("%g (%g - %g);%g;%g;%g\n", full_frequencies[x + dwidth/2], full_frequencies[x], full_frequencies[x+dwidth], det_level, res_power, res_bw);
+			if(0)if(fabs(full_frequencies[x + dwidth/2] - 2412500000) < 110000)
+			{
+				printf("Freq: %g, dwidth %d, dlvl %g, dpwr %g\n", full_frequencies[x + dwidth/2], dwidth, det_level, res_power);
+				for(int n = x + dwidth/2 - 100; n < x + dwidth/2 + 100; n++)
+					printf("%g\n", full_spectrum_max[n]);
+			}
 			if(full_frequencies[x + dwidth/2] > 2385*1000000.0 && full_frequencies[x + dwidth/2] < 2450*1000000.0)
 			{
 //				printf("%g;%g;%g;%g\n", full_frequencies[x + dwidth/2], det_level, res_power, res_bw);
@@ -520,6 +526,7 @@ void run_detectors()
 	float min_threshold = 0.3; //anything less won't be considered as a signal at all
 	float in_peak_threshold = 0.7;
 	float loc_max = 0;
+	float loc_max_freq = 0;
 	float loc_start_bw = 0;
 	float loc_end_bw = 0;
 	for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data; x++)
@@ -531,6 +538,9 @@ void run_detectors()
 			{
 				loc_max = full_detector_res[x];
 				loc_max_pos = x;
+				loc_max_freq = full_frequencies[x];
+				loc_max_length_right = 0;
+				loc_max_length_left = 0;
 			}
 			if(dlvl > in_peak_threshold * loc_max)
 			{
@@ -551,8 +561,45 @@ void run_detectors()
 						float center_freq = 0.5*(full_frequencies[loc_max_pos + loc_max_length_right] + full_frequencies[loc_max_pos - loc_max_length_left]) * 0.000001;
 						float sig_power = full_detector_power[loc_max_pos];
 						float sig_bw = (full_frequencies[loc_max_pos + loc_max_length_right] - full_frequencies[loc_max_pos - loc_max_length_left])* 0.000001;
-						if(sig_power > -80)
-							printf("signal detected: F %.1f MHz P %.0f dBm BW %.1f\n", center_freq, sig_power, sig_bw);
+						float avg_power = 0;
+						float max_power = -100;
+						float avgZ = 0;
+						for(int px = loc_max_pos - loc_max_length_left; px < loc_max_pos + loc_max_length_right; px++)
+						{
+							if(full_spectrum_max[px] > max_power) max_power = full_spectrum_max[px];
+							avg_power += full_spectrum_max[px];
+							avgZ++;
+						}
+						avg_power /= avgZ;
+						sig_power = 0.7*avg_power + 0.3*max_power;
+
+						int bw_start = loc_max_pos - loc_max_length_left, bw_end = loc_max_pos + loc_max_length_right;
+						float sp_avgs = avg_power * 0.9;
+						for(int px = loc_max_pos; px < loc_max_pos + loc_max_length_right; px++)
+						{
+							sp_avgs *= 0.8;
+							sp_avgs += 0.2*full_spectrum_max[px];
+							if(sp_avgs < avg_power*1.1)
+							{
+								bw_end = px;
+								break;
+							}
+						}
+						sp_avgs = avg_power * 1.1;
+						for(int px = loc_max_pos; px > loc_max_pos - loc_max_length_left; px--)
+						{
+							sp_avgs *= 0.8;
+							sp_avgs += 0.2*full_spectrum_max[px];
+							if(sp_avgs < avg_power*1.1)
+							{
+								bw_start = px;
+								break;
+							}
+						}
+						sig_bw = (full_frequencies[bw_end] - full_frequencies[bw_start])*0.000001;
+
+// 						if(sig_power > -80.0)
+						printf("signal detected: F %.1f MHz P %.0f dBm BW %.1f MHz\n", center_freq, sig_power, sig_bw);
 					}
 				}
 				loc_max = 0;
