@@ -182,8 +182,8 @@ typedef struct sSignalDetector
 		float left_to_background = left_power_high - out_low_average;
 		float right_to_background = right_power_high - out_low_average;
 
-		float center_to_left = (center_power_high - left_power_high) / center_to_background;
-		float center_to_right = (center_power_high - right_power_high) / center_to_background;
+//		float center_to_left = (center_power_high - left_power_high) / center_to_background;
+//		float center_to_right = (center_power_high - right_power_high) / center_to_background;
 		
 		float detected_score = 0;
 		

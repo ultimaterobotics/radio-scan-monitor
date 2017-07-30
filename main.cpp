@@ -251,6 +251,9 @@ void load_scan_data()
 //	float end_freq = f_shm[2];
 	float gain_mod = 0;//f_shm[3];
 	float gain_add = 10.0;
+	
+	float norm_avg_param = 0.9;
+	float max_mult_param = 1.1;
 	int num_points = i_shm[4];
 	
 //	float len = num_points;
@@ -274,8 +277,10 @@ void load_scan_data()
 		}
 		else
 		{
-			full_spectrum_avg[freq_pos] += value;
-			full_spectrum_avgZ[freq_pos] += 1.0;
+			full_spectrum_avg[freq_pos] *= norm_avg_param;
+			full_spectrum_avg[freq_pos] += (1.0 - norm_avg_param) * value;
+			full_spectrum_avgZ[freq_pos] = 1.0;
+			full_spectrum_max[freq_pos] *= max_mult_param;
 			if(value > full_spectrum_max[freq_pos])
 				full_spectrum_max[freq_pos] = value;
 		}
@@ -460,7 +465,7 @@ void init_detectors()
 {
 	detectors_count = 1;
 	detectors = new sSignalDetector[detectors_count];
-	detectors[0].name = "WiFi";
+//	detectors[0].name = "WiFi";
 	detectors[0].single_peak = 1;
 	detectors[0].standard_max_frequency_MHz = 99999;
 	detectors[0].standard_min_frequency_MHz = 0;
@@ -477,12 +482,13 @@ float freq_step_hz = 100000;
 
 void run_detectors()
 {
+	int has_detected = 0;
 	detector_chart->clear();
 	for(int d = 0; d < detectors_count; d++)
 	{
 		int dwidth = detectors[d].get_window_width_points(freq_step_hz);
-		float df_min = detectors[d].get_min_freq();
-		float df_max = detectors[d].get_max_freq();
+//		float df_min = detectors[d].get_min_freq();
+//		float df_max = detectors[d].get_max_freq();
 		for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data - dwidth; x++)
 		{
 			float res_power = 0;
@@ -526,9 +532,9 @@ void run_detectors()
 	float min_threshold = 0.3; //anything less won't be considered as a signal at all
 	float in_peak_threshold = 0.7;
 	float loc_max = 0;
-	float loc_max_freq = 0;
-	float loc_start_bw = 0;
-	float loc_end_bw = 0;
+//	float loc_max_freq = 0;
+//	float loc_start_bw = 0;
+//	float loc_end_bw = 0;
 	for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data; x++)
 	{
 		if(full_detector_max_id[x] >= 0)
@@ -538,7 +544,7 @@ void run_detectors()
 			{
 				loc_max = full_detector_res[x];
 				loc_max_pos = x;
-				loc_max_freq = full_frequencies[x];
+//				loc_max_freq = full_frequencies[x];
 				loc_max_length_right = 0;
 				loc_max_length_left = 0;
 			}
@@ -599,7 +605,13 @@ void run_detectors()
 						sig_bw = (full_frequencies[bw_end] - full_frequencies[bw_start])*0.000001;
 
 // 						if(sig_power > -80.0)
-						printf("signal detected: F %.1f MHz P %.0f dBm BW %.1f MHz\n", center_freq, sig_power, sig_bw);
+						if(!has_detected)
+						{
+							printf("\nDetected signals:\n");
+							has_detected = 1;
+						}
+							
+						printf("\tF %.1f MHz P %.0f dBm BW %.1f MHz\n", center_freq, sig_power, sig_bw);
 					}
 				}
 				loc_max = 0;
@@ -608,6 +620,8 @@ void run_detectors()
 			}
 		}
 	}
+	if(!has_detected)
+		printf("\n no signals detected \n");
 }
 
 int main(int argc, char* argv[])
@@ -759,6 +773,9 @@ int main(int argc, char* argv[])
 
 		if (mstate & SDL_BUTTON (2)) mbtn_m = 1;
 		if (mstate & SDL_BUTTON (3)) mbtn_r = 1;
+		
+		mbtn_m = mbtn_r + lclk;
+		mbtn_r = mbtn_m;
 		if(mouse_y > h*0.7)
 		{
 			if(main_chart != NULL)
