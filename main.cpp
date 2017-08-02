@@ -15,6 +15,9 @@
 #include "csvReader.h"
 #include "detector.h"
 
+float wide_threshold = 2; //in dBm, difference between peak and background to start
+float narrow_threshold = 10; //detection process
+
 int debug_print = 0;
 
 SDL_Texture* myTexture = NULL;
@@ -247,6 +250,8 @@ void shared_mem_init()
     }
 }
 
+int need_update_detector = 0;
+
 void load_scan_data()
 {
 	float *f_shm = (float*)shared_memory;
@@ -261,6 +266,12 @@ void load_scan_data()
 	int num_points = i_shm[4];
 	
 //	float len = num_points;
+	
+	float centr_freq = f_shm[5 + num_points];
+	int centr_pos = (centr_freq - full_sp_start_freq) / full_sp_freq_step;
+	
+	int fill_cp = (full_sp_min_filled_data + full_sp_max_filled_data)/2;
+	if(centr_pos - fill_cp < 2000 && !need_update_detector) need_update_detector = 1;
 	
 	for(int r = num_points/4; r < 3*num_points/4; r++)
 	{
@@ -476,8 +487,8 @@ void init_detectors()
 	detectors[0].left_width_kHz = 2000;
 	detectors[0].right_shift_kHz = 7000;
 	detectors[0].right_width_kHz = 2000;
-	detectors[0].left_relative_power = 0.9;
-	detectors[0].right_relative_power = 0.9;
+	detectors[0].left_relative_power = 0.0;
+	detectors[0].right_relative_power = 0.0;
 
 	sprintf(detectors[1].name, "narrow");
 	detectors[1].single_peak = 1;
@@ -494,8 +505,60 @@ void init_detectors()
 
 float freq_step_hz = 100000;
 
+typedef struct sDetectedSignal
+{
+	int type;
+	float central_frequency;
+	float BW;
+	float power;
+}sDetectedSignal;
+#define MAX_DETECTIONS 10000
+sDetectedSignal detected_signals[MAX_DETECTIONS];
+int detected_signals_count;
+
+void clear_detected_signals()
+{
+	detected_signals_count = 0;
+}
+void add_detected_signal(int type, float center, float BW, float power)
+{
+	if(detected_signals_count >= MAX_DETECTIONS) return;
+	for(int s = 0; s < detected_signals_count; s++)
+	{
+		if(detected_signals[s].type != type) continue;
+		float c2 = detected_signals[s].central_frequency;
+		float bw2 = detected_signals[s].BW;
+		if((center - BW < c2 && center + BW > c2) || (c2 - bw2 < center && c2 + bw2 > center)) //intersect
+		{
+			if(power > detected_signals[s].power)
+			{
+				detected_signals[s].central_frequency = center;
+				detected_signals[s].BW = BW;
+				detected_signals[s].power = power;
+				return;
+			}
+			else
+				return;
+		}
+	}
+	detected_signals[detected_signals_count].type = type;
+	detected_signals[detected_signals_count].central_frequency = center;
+	detected_signals[detected_signals_count].BW = BW;
+	detected_signals[detected_signals_count].power = power;
+	detected_signals_count++;
+}
+void print_detected_signals()
+{
+	for(int s = 0; s < detected_signals_count; s++)
+//	if((detected_signals[s].type == 0 && detected_signals[s].BW > 4.5 ) || (detected_signals[s].type == 1 && detected_signals[s].BW < 5) )
+	{
+		printf("\ttype: %s F %.1f MHz P %.0f dBm BW %.1f MHz\n", detectors[detected_signals[s].type].name, detected_signals[s].central_frequency, detected_signals[s].power, detected_signals[s].BW);
+	}
+}
+
 void run_detectors()
 {
+	clear_detected_signals();
 	int has_detected = 0;
 	detector_chart->clear();
 	for(int d = 0; d < detectors_count; d++)
@@ -532,7 +595,7 @@ void run_detectors()
 	int min_peak_length = 3; //don't even consider spikes as signal
 	int valid_peak_length = 6;
 	int valid_max_length = 300; //30MHz, anything more won't be considered as signal
-	float min_threshold = 0.1; //anything less won't be considered as a signal at all
+	float min_threshold = wide_threshold; //anything less won't be considered as a signal at all
 	float in_peak_threshold = 0.7;
 	float loc_max = 0;
 //	float loc_max_freq = 0;
@@ -540,7 +603,7 @@ void run_detectors()
 //	float loc_end_bw = 0;
 	for(int d = 0; d < detectors_count; d++)
 	{
-		if(d == 1) min_threshold = 0.4; //strict rules for narrow filters
+		if(d == 1) min_threshold = narrow_threshold; //strict rules for narrow filters
 		for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data; x++)
 	{
 		
@@ -635,7 +698,20 @@ void run_detectors()
 					center_freq = 0.5*(full_frequencies[bw_end] + full_frequencies[bw_start]) * 0.000001;
 					if(sig_bw > 0.5) sig_bw -= 0.2; //compensate for edge effects for too narrow bands
 					if(sig_bw > 0.6) sig_bw -= 0.2;
-					sig_power = 10.0 * log10(sig_bw * 10.0 * pow(10.0, sig_power*0.1));
+
+					double pow_integr = 0.00000001;
+					double pow_high_05 = 0.00000001;
+					for(int px = bw_start; px < bw_end; px++)
+					{
+						pow_integr += pow(10.0, full_spectrum_max[px] * 0.1);
+						if(full_spectrum_max[px] > min_power + 0.5*(max_power - min_power))
+							pow_high_05 += pow(10.0, full_spectrum_max[px] * 0.1);
+					}
+
+					sig_power = 10.0 * log10(pow_integr);
+					float sig_power_high_05 = 10.0 * log10(pow_high_05);
+					
+					if(sig_power_high_05 < sig_power-3) continue; //too unequal power
 
 // 						if(sig_power > -80.0)
 					if(!has_detected)
@@ -644,9 +720,14 @@ void run_detectors()
 						has_detected = 1;
 					}
 					//printf("F %.1f P %.0f BW %.1f sdv %g mm %g\n", center_freq, sig_power, sig_bw, power_sdv, max_power - min_power);
-					//if(sig_power > -70 && below_avg < 0.7)
-						if((d == 0 && sig_bw > 4.5 ) || (d == 1 && sig_bw < 5) )
-							printf("\ttype: %s F %.1f MHz P %.0f dBm BW %.1f MHz\n", detectors[d].name, center_freq, sig_power, sig_bw);
+					if(sig_power > -70 && below_avg < 0.7)
+					if((d == 0 && sig_bw > 4.5 ) || (d == 1 && sig_bw < 5) )
+					{
+						add_detected_signal(d, center_freq, sig_bw, sig_power);
+						//printf("\ttype: %s F %.1f MHz pow %g pow09 %g\n", detectors[d].name, center_freq, sig_power, sig_power_high_05);
+						
+					}
+//							printf("\ttype: %s F %.1f MHz P %.0f dBm BW %.1f MHz\n", detectors[d].name, center_freq, sig_power, sig_bw);
 				}
 			}
 			loc_max = 0;
@@ -658,6 +739,8 @@ void run_detectors()
 	}
 	if(!has_detected)
 		printf("\n no signals detected \n");
+	else
+		print_detected_signals();
 }
 
 int main(int argc, char* argv[])
@@ -691,7 +774,7 @@ int main(int argc, char* argv[])
 	
 	int done = 0;
 	
-	timeval curTime, prevTime, zeroTime;
+	timeval curTime, prevTime, zeroTime, detReqTime;
 	gettimeofday(&prevTime, NULL);
 	gettimeofday(&zeroTime, NULL);
 	
@@ -869,8 +952,23 @@ int main(int argc, char* argv[])
 
 		if(debug_print) printf("input processed\n");
 
+		if(need_update_detector == 1)
+		{
+			gettimeofday(&detReqTime, NULL);
+			need_update_detector = 2;
+		}
 		gettimeofday(&curTime, NULL);
 		int dT = (curTime.tv_sec - prevTime.tv_sec) * 1000000 + (curTime.tv_usec - prevTime.tv_usec);
+
+		if(need_update_detector == 2)
+		{
+			int det_dt = (curTime.tv_sec - detReqTime.tv_sec) * 1000000 + (curTime.tv_usec - detReqTime.tv_usec);
+			if(det_dt > 1000000)
+			{
+				need_update_detector = 0;
+				run_detectors();
+			}
+		}
 
 		memset(drawPix, 0, w*h*4);
 		prevTime = curTime;
