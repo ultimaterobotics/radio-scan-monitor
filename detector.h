@@ -8,7 +8,7 @@
  * */
 typedef struct sSignalDetector
 {
-	char *name; //filled by user, optional
+	char name[32]; //filled by user, optional
 	float standard_min_frequency_MHz; //min frequency where this signal type should apper, lower frequencies will have decreased probability
 	float standard_max_frequency_MHz; //max frequency where this signal type should apper, higher frequencies will have decreased probability
 
@@ -187,12 +187,19 @@ typedef struct sSignalDetector
 		
 		float detected_score = 0;
 		
+		if(single_peak)
+		{
+			left_relative_power = 0;
+			right_relative_power = 0;
+		}
+		
 		float rel_left = left_relative_power - (left_to_background / center_to_background);
 		float rel_right = right_relative_power - (right_to_background / center_to_background);
 		rel_left = 1.0 - fabs(rel_left);
 		rel_right = 1.0 - fabs(rel_right);
 		if(rel_left < 0.01) rel_left = 0.01;
 		if(rel_right < 0.01) rel_right = 0.01;
+//		detected_score = center_to_background * rel_left * rel_right;
 		if(single_peak) detected_score = center_to_background;
 		else detected_score = center_to_background * rel_left * rel_right;
 //		printf("ds: %g, cb: %g rl %g rr %g\n", detected_score, center_to_background, rel_left, rel_right);

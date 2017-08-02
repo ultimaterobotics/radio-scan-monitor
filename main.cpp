@@ -60,10 +60,10 @@ float *full_spectrum_max;
 float *full_spectrum_avgZ;
 float *full_frequencies;
 
-int *full_detector_max_id;
 float *full_detector_res;
 float *full_detector_power;
 float *full_detector_bw;
+int detectors_count = 2;
 
 int full_sp_size = 60000; //6GHz with 0.1MHz step
 float full_sp_start_freq = 0; //in Hz
@@ -79,10 +79,9 @@ void init_spectrum()
 	full_spectrum_max = new float[full_sp_size];
 	full_frequencies = new float[full_sp_size];
 	
-	full_detector_max_id = new int[full_sp_size];
-	full_detector_res = new float[full_sp_size];
-	full_detector_power = new float[full_sp_size];
-	full_detector_bw = new float[full_sp_size];
+	full_detector_res = new float[full_sp_size*detectors_count];
+	full_detector_power = new float[full_sp_size*detectors_count];
+	full_detector_bw = new float[full_sp_size*detectors_count];
 	
 	full_sp_freq_step = (full_sp_end_freq - full_sp_start_freq) / (float)full_sp_size;
 	float cur_freq = full_sp_start_freq;
@@ -91,9 +90,14 @@ void init_spectrum()
 		full_spectrum_avg[n] = -100; //default, never can be reached in hardware
 		full_spectrum_avgZ[n] = 0.0000000001; //to avoid zero division in any case
 		full_spectrum_max[n] = -100;
-		full_detector_max_id[n] = -1;
 		full_frequencies[n] = cur_freq;
 		cur_freq += full_sp_freq_step;
+	}
+	for(int n = 0; n < full_sp_size*detectors_count; n++)
+	{
+		full_detector_res[n] = 0;
+		full_detector_power[n] = 0;
+		full_detector_bw[n] = 0;
 	}
 }
 
@@ -252,8 +256,8 @@ void load_scan_data()
 	float gain_mod = 0;//f_shm[3];
 	float gain_add = 10.0;
 	
-	float norm_avg_param = 0.9;
-	float max_mult_param = 1.1;
+	float norm_avg_param = 0.97;
+	float max_mult_param = 1.01;
 	int num_points = i_shm[4];
 	
 //	float len = num_points;
@@ -459,13 +463,11 @@ void save_logs()
 }
 
 sSignalDetector *detectors;
-int detectors_count = 0;
 
 void init_detectors()
 {
-	detectors_count = 1;
 	detectors = new sSignalDetector[detectors_count];
-//	detectors[0].name = "WiFi";
+	sprintf(detectors[0].name, "wide");
 	detectors[0].single_peak = 1;
 	detectors[0].standard_max_frequency_MHz = 99999;
 	detectors[0].standard_min_frequency_MHz = 0;
@@ -476,6 +478,18 @@ void init_detectors()
 	detectors[0].right_width_kHz = 2000;
 	detectors[0].left_relative_power = 0.9;
 	detectors[0].right_relative_power = 0.9;
+
+	sprintf(detectors[1].name, "narrow");
+	detectors[1].single_peak = 1;
+	detectors[1].standard_max_frequency_MHz = 99999;
+	detectors[1].standard_min_frequency_MHz = 0;
+	detectors[1].center_width_kHz = 300;
+	detectors[1].left_shift_kHz = 1550;
+	detectors[1].left_width_kHz = 1400;
+	detectors[1].right_shift_kHz = 1550;
+	detectors[1].right_width_kHz = 1400;
+	detectors[1].left_relative_power = 0.9;
+	detectors[1].right_relative_power = 0.9;
 }
 
 float freq_step_hz = 100000;
@@ -495,20 +509,9 @@ void run_detectors()
 			float res_bw = 0;
 			float det_level = detectors[d].process_data(full_spectrum_max + x, full_frequencies[x + dwidth/2], freq_step_hz, dwidth, &res_power, &res_bw);
 			int sp_idx = x + dwidth/2;
-			if(full_detector_max_id[sp_idx] < 0)
-			{
-				full_detector_max_id[sp_idx] = d;
-				full_detector_res[sp_idx] = det_level;
-				full_detector_power[sp_idx] = res_power;
-				full_detector_bw[sp_idx] = res_bw;
-			}
-			if(det_level > full_detector_res[sp_idx])
-			{
-				full_detector_max_id[sp_idx] = d;
-				full_detector_res[sp_idx] = det_level;
-				full_detector_power[sp_idx] = res_power;
-				full_detector_bw[sp_idx] = res_bw;
-			}
+			full_detector_res[full_sp_size*d + sp_idx] = det_level;
+			full_detector_power[full_sp_size*d + sp_idx] = res_power;
+			full_detector_bw[full_sp_size*d + sp_idx] = res_bw;
 //			printf("%g (%g - %g);%g;%g;%g\n", full_frequencies[x + dwidth/2], full_frequencies[x], full_frequencies[x+dwidth], det_level, res_power, res_bw);
 			if(0)if(fabs(full_frequencies[x + dwidth/2] - 2412500000) < 110000)
 			{
@@ -516,10 +519,10 @@ void run_detectors()
 				for(int n = x + dwidth/2 - 100; n < x + dwidth/2 + 100; n++)
 					printf("%g\n", full_spectrum_max[n]);
 			}
-			if(full_frequencies[x + dwidth/2] > 2385*1000000.0 && full_frequencies[x + dwidth/2] < 2450*1000000.0)
+			if(full_frequencies[x + dwidth/2] > 1200*1000000.0 && full_frequencies[x + dwidth/2] < 1265*1000000.0)
 			{
 //				printf("%g;%g;%g;%g\n", full_frequencies[x + dwidth/2], det_level, res_power, res_bw);
-				detector_chart->addV(det_level);
+				if(d==1)detector_chart->addV(det_level);
 			}
 		}
 	}
@@ -529,96 +532,129 @@ void run_detectors()
 	int min_peak_length = 3; //don't even consider spikes as signal
 	int valid_peak_length = 6;
 	int valid_max_length = 300; //30MHz, anything more won't be considered as signal
-	float min_threshold = 0.3; //anything less won't be considered as a signal at all
+	float min_threshold = 0.1; //anything less won't be considered as a signal at all
 	float in_peak_threshold = 0.7;
 	float loc_max = 0;
 //	float loc_max_freq = 0;
 //	float loc_start_bw = 0;
 //	float loc_end_bw = 0;
-	for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data; x++)
+	for(int d = 0; d < detectors_count; d++)
 	{
-		if(full_detector_max_id[x] >= 0)
+		if(d == 1) min_threshold = 0.4; //strict rules for narrow filters
+		for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data; x++)
+	{
+		
+		int didx = full_sp_size*d;
+		float dlvl = full_detector_res[didx + x];
+		if(dlvl > loc_max && full_detector_res[didx + x] > min_threshold)
 		{
-			float dlvl = full_detector_res[x];
-			if(dlvl > loc_max && full_detector_res[x] > min_threshold)
-			{
-				loc_max = full_detector_res[x];
-				loc_max_pos = x;
+			loc_max = full_detector_res[didx + x];
+			loc_max_pos = x;
 //				loc_max_freq = full_frequencies[x];
-				loc_max_length_right = 0;
-				loc_max_length_left = 0;
-			}
-			if(dlvl > in_peak_threshold * loc_max)
+			loc_max_length_right = 0;
+			loc_max_length_left = 0;
+		}
+		if(dlvl > in_peak_threshold * loc_max)
+		{
+			loc_max_length_right++;
+		}
+		else
+		{
+			if(loc_max_length_right > min_peak_length)
 			{
-				loc_max_length_right++;
-			}
-			else
-			{
-				if(loc_max_length_right > min_peak_length)
+				for(int y = loc_max_pos; y > 0; y--)
 				{
-					for(int y = loc_max_pos; y > 0; y--)
+					if(full_detector_res[didx + y] < in_peak_threshold * loc_max) break;
+					loc_max_length_left++;
+				}
+				int lng = loc_max_length_left + loc_max_length_right;
+				if(lng >= valid_peak_length && lng < valid_max_length)
+				{
+					float center_freq = 0.5*(full_frequencies[loc_max_pos + loc_max_length_right] + full_frequencies[loc_max_pos - loc_max_length_left]) * 0.000001;
+					float sig_power = full_detector_power[didx + loc_max_pos];
+					float sig_bw = (full_frequencies[loc_max_pos + loc_max_length_right] - full_frequencies[loc_max_pos - loc_max_length_left])* 0.000001;
+					float avg_power = 0;
+					float max_power = -100;
+					float min_power = 0;
+					float avgZ = 0;
+					for(int px = loc_max_pos - loc_max_length_left; px < loc_max_pos + loc_max_length_right; px++)
 					{
-						if(full_detector_res[y] < in_peak_threshold * loc_max) break;
-						loc_max_length_left++;
+						if(full_spectrum_max[px] > max_power) max_power = full_spectrum_max[px];
+						if(full_spectrum_max[px] < min_power) min_power = full_spectrum_max[px];
+						avg_power += full_spectrum_max[px];
+						avgZ++;
 					}
-					int lng = loc_max_length_left + loc_max_length_right;
-					if(lng >= valid_peak_length && lng < valid_max_length)
-					{
-						float center_freq = 0.5*(full_frequencies[loc_max_pos + loc_max_length_right] + full_frequencies[loc_max_pos - loc_max_length_left]) * 0.000001;
-						float sig_power = full_detector_power[loc_max_pos];
-						float sig_bw = (full_frequencies[loc_max_pos + loc_max_length_right] - full_frequencies[loc_max_pos - loc_max_length_left])* 0.000001;
-						float avg_power = 0;
-						float max_power = -100;
-						float avgZ = 0;
-						for(int px = loc_max_pos - loc_max_length_left; px < loc_max_pos + loc_max_length_right; px++)
-						{
-							if(full_spectrum_max[px] > max_power) max_power = full_spectrum_max[px];
-							avg_power += full_spectrum_max[px];
-							avgZ++;
-						}
-						avg_power /= avgZ;
-						sig_power = 0.7*avg_power + 0.3*max_power;
+					avg_power /= avgZ;
 
-						int bw_start = loc_max_pos - loc_max_length_left, bw_end = loc_max_pos + loc_max_length_right;
-						float sp_avgs = avg_power * 0.9;
-						for(int px = loc_max_pos; px < loc_max_pos + loc_max_length_right; px++)
+					sig_power = 0.7*avg_power + 0.3*max_power;
+
+					int bw_start = loc_max_pos - loc_max_length_left, bw_end = loc_max_pos + loc_max_length_right;
+					float sp_avgs = avg_power * 0.9;
+					for(int px = loc_max_pos; px < loc_max_pos + loc_max_length_right; px++)
+					{
+						sp_avgs *= 0.3;
+						sp_avgs += 0.7*full_spectrum_max[px];
+						if(sp_avgs < avg_power*1.05)
 						{
-							sp_avgs *= 0.8;
-							sp_avgs += 0.2*full_spectrum_max[px];
-							if(sp_avgs < avg_power*1.1)
-							{
-								bw_end = px;
-								break;
-							}
+							bw_end = px;
+							break;
 						}
-						sp_avgs = avg_power * 1.1;
-						for(int px = loc_max_pos; px > loc_max_pos - loc_max_length_left; px--)
+					}
+					sp_avgs = avg_power * 1.1;
+					for(int px = loc_max_pos+1; px > loc_max_pos - loc_max_length_left; px--)
+					{
+						sp_avgs *= 0.3;
+						sp_avgs += 0.7*full_spectrum_max[px];
+						if(sp_avgs < avg_power*1.05)
 						{
-							sp_avgs *= 0.8;
-							sp_avgs += 0.2*full_spectrum_max[px];
-							if(sp_avgs < avg_power*1.1)
-							{
-								bw_start = px;
-								break;
-							}
+							bw_start = px;
+							break;
 						}
-						sig_bw = (full_frequencies[bw_end] - full_frequencies[bw_start])*0.000001;
+					}
+					
+					avg_power = 0;
+					max_power = -100;
+					min_power = 0;
+					avgZ = 0;
+					for(int px = bw_start; px < bw_end; px++)
+					{
+						if(full_spectrum_max[px] > max_power) max_power = full_spectrum_max[px];
+						if(full_spectrum_max[px] < min_power) min_power = full_spectrum_max[px];
+						avg_power += full_spectrum_max[px];
+						avgZ++;
+					}
+					avg_power /= avgZ;
+					sig_power = 0.7*avg_power + 0.3*max_power;
+					
+					float below_avg = 0;
+					for(int px = bw_start; px < bw_end; px++)
+						if(full_spectrum_max[px] < avg_power) below_avg += 1.0;
+					below_avg /= (float)(bw_end - bw_start);
+					
+					sig_bw = (full_frequencies[bw_end] - full_frequencies[bw_start])*0.000001;
+					center_freq = 0.5*(full_frequencies[bw_end] + full_frequencies[bw_start]) * 0.000001;
+					if(sig_bw > 0.5) sig_bw -= 0.2; //compensate for edge effects for too narrow bands
+					if(sig_bw > 0.6) sig_bw -= 0.2;
+					sig_power = 10.0 * log10(sig_bw * 10.0 * pow(10.0, sig_power*0.1));
 
 // 						if(sig_power > -80.0)
-						if(!has_detected)
-						{
-							printf("\nDetected signals:\n");
-							has_detected = 1;
-						}
-							
-						printf("\tF %.1f MHz P %.0f dBm BW %.1f MHz\n", center_freq, sig_power, sig_bw);
+					if(!has_detected)
+					{
+						printf("\nDetected signals:\n");
+						has_detected = 1;
 					}
+					//printf("F %.1f P %.0f BW %.1f sdv %g mm %g\n", center_freq, sig_power, sig_bw, power_sdv, max_power - min_power);
+					//if(sig_power > -70 && below_avg < 0.7)
+						if((d == 0 && sig_bw > 4.5 ) || (d == 1 && sig_bw < 5) )
+							printf("\ttype: %s F %.1f MHz P %.0f dBm BW %.1f MHz\n", detectors[d].name, center_freq, sig_power, sig_bw);
 				}
-				loc_max = 0;
-				loc_max_length_left = 0;
-				loc_max_length_right = 0;
 			}
+			loc_max = 0;
+			loc_max_length_left = 0;
+			loc_max_length_right = 0;
 		}
+	}
+	
 	}
 	if(!has_detected)
 		printf("\n no signals detected \n");
@@ -802,28 +838,28 @@ int main(int argc, char* argv[])
 		alt_pressed = keys[SDL_SCANCODE_LALT];
 
 		if(keys[SDL_SCANCODE_Q])
-			detectors[0].center_width_kHz *= 1.001;
+			detectors[1].center_width_kHz *= 1.001;
 		if(keys[SDL_SCANCODE_A])
-			detectors[0].center_width_kHz *= 0.999;
+			detectors[1].center_width_kHz *= 0.999;
 		if(keys[SDL_SCANCODE_W])
 		{
-			detectors[0].left_shift_kHz *= 1.001;
-			detectors[0].right_shift_kHz *= 1.001;
+			detectors[1].left_shift_kHz *= 1.001;
+			detectors[1].right_shift_kHz *= 1.001;
 		}
 		if(keys[SDL_SCANCODE_S])
 		{
-			detectors[0].left_shift_kHz *= 0.999;
-			detectors[0].right_shift_kHz *= 0.999;
+			detectors[1].left_shift_kHz *= 0.999;
+			detectors[1].right_shift_kHz *= 0.999;
 		}
 		if(keys[SDL_SCANCODE_Z])
 		{
-			detectors[0].left_width_kHz *= 1.001;
-			detectors[0].right_width_kHz *= 1.001;
+			detectors[1].left_width_kHz *= 1.001;
+			detectors[1].right_width_kHz *= 1.001;
 		}
 		if(keys[SDL_SCANCODE_X])
 		{
-			detectors[0].left_width_kHz *= 0.999;
-			detectors[0].right_width_kHz *= 0.999;
+			detectors[1].left_width_kHz *= 0.999;
+			detectors[1].right_width_kHz *= 0.999;
 		}
 		
 
@@ -879,7 +915,7 @@ int main(int argc, char* argv[])
 		
 		float mDT = 1000000.0 / (float)dT;
 		fps = fps*0.9 + 0.1*mDT;
-		sprintf(outstr, "fps %.0f cw %g lf %g lw %g", fps, detectors[0].center_width_kHz, detectors[0].left_shift_kHz, detectors[0].left_width_kHz);
+		sprintf(outstr, "fps %.0f cw %g lf %g lw %g", fps, detectors[1].center_width_kHz, detectors[1].left_shift_kHz, detectors[1].left_width_kHz);
 		msg = TTF_RenderText_Solid(font, outstr, textColor); 
 		mpos.x = 5; mpos.y = curY; curY += curDY;
 		mpos.w = msg->w; mpos.h = msg->h;
