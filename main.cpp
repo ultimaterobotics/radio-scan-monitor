@@ -18,6 +18,25 @@
 float wide_threshold = 2; //in dBm, difference between peak and background to start
 float narrow_threshold = 10; //detection process
 
+sSignalDetector *detectors;
+int detectors_count = 2;
+
+void init_detectors()
+{
+	detectors = new sSignalDetector[detectors_count];
+	sprintf(detectors[0].name, "wide");
+	detectors[0].standard_max_frequency_MHz = 99999;
+	detectors[0].standard_min_frequency_MHz = 0;
+	detectors[0].center_width_kHz = 20000;
+	detectors[0].side_width_kHz = 10000;
+
+	sprintf(detectors[1].name, "narrow");
+	detectors[1].standard_max_frequency_MHz = 99999;
+	detectors[1].standard_min_frequency_MHz = 0;
+	detectors[1].center_width_kHz = 1000;
+	detectors[1].side_width_kHz = 1000;
+}
+
 int debug_print = 0;
 
 SDL_Texture* myTexture = NULL;
@@ -60,13 +79,16 @@ void drawFrameM(uint8_t *drawBuf, int w, int h)
 
 float *full_spectrum_avg;
 float *full_spectrum_max;
+float *full_spectrum_proc_wide;
+float *full_spectrum_proc;
+float *full_spectrum_gains;
 float *full_spectrum_avgZ;
 float *full_frequencies;
 
 float *full_detector_res;
 float *full_detector_power;
+float *full_detector_centroid;
 float *full_detector_bw;
-int detectors_count = 2;
 
 int full_sp_size = 60000; //6GHz with 0.1MHz step
 float full_sp_start_freq = 0; //in Hz
@@ -74,25 +96,35 @@ float full_sp_end_freq = 6000000000.0; //in Hz
 float full_sp_freq_step;
 int full_sp_min_filled_data = full_sp_size; //min > max indicating there is no data
 int full_sp_max_filled_data = 0;
+float no_signal_value = -130;
+
 
 void init_spectrum()
 {
 	full_spectrum_avg = new float[full_sp_size];
 	full_spectrum_avgZ = new float[full_sp_size];
 	full_spectrum_max = new float[full_sp_size];
+	full_spectrum_proc = new float[full_sp_size];
+	full_spectrum_gains = new float[full_sp_size];
+	full_spectrum_proc_wide = new float[full_sp_size];
+
 	full_frequencies = new float[full_sp_size];
 	
 	full_detector_res = new float[full_sp_size*detectors_count];
 	full_detector_power = new float[full_sp_size*detectors_count];
+	full_detector_centroid = new float[full_sp_size*detectors_count];
 	full_detector_bw = new float[full_sp_size*detectors_count];
 	
 	full_sp_freq_step = (full_sp_end_freq - full_sp_start_freq) / (float)full_sp_size;
 	float cur_freq = full_sp_start_freq;
 	for(int n = 0; n < full_sp_size; n++)
 	{
-		full_spectrum_avg[n] = -100; //default, never can be reached in hardware
+		full_spectrum_avg[n] = no_signal_value; //default, never can be reached in hardware
 		full_spectrum_avgZ[n] = 0.0000000001; //to avoid zero division in any case
-		full_spectrum_max[n] = -100;
+		full_spectrum_max[n] = no_signal_value;
+		full_spectrum_proc[n] = no_signal_value;
+		full_spectrum_proc_wide[n] = no_signal_value;
+		full_spectrum_gains[n] = 0;
 		full_frequencies[n] = cur_freq;
 		cur_freq += full_sp_freq_step;
 	}
@@ -100,6 +132,7 @@ void init_spectrum()
 	{
 		full_detector_res[n] = 0;
 		full_detector_power[n] = 0;
+		full_detector_centroid[n] = 0;
 		full_detector_bw[n] = 0;
 	}
 }
@@ -118,7 +151,7 @@ CSimpleChart *zoom_chart_freq; //only for storing frequency data, not displaying
 
 CSimpleChart *detector_chart;
 float zoom_f = 1;
-float zero_level = -90;
+float zero_level = -120;
 int zoom_base_size = 2000;
 int zoom_size = 2000;
 
@@ -190,10 +223,12 @@ void fill_zoom_values()
 	for(int r = rbg; r < red; r ++)
 	{
 		if(full_spectrum_avgZ[r] > 0.5)
+		{
 //			zoom_chart->addV(full_spectrum_avg[r] / full_spectrum_avgZ[r]);
-			zoom_chart->addV(full_spectrum_max[r]);
+			zoom_chart->addV(full_spectrum_proc[r]);			
+		}
 		else 
-			zoom_chart->addV(-100);
+			zoom_chart->addV(no_signal_value);
 		zoom_chart_freq->addV(full_frequencies[r]);			
 	}
 }
@@ -220,10 +255,12 @@ void fill_spectrum_data()
 	for(int r = start_idx; r < end_idx; r ++)
 	{
 		if(full_spectrum_avgZ[r] > 0.5)
+		{
 //			main_chart->addV(full_spectrum_avg[r] / full_spectrum_avgZ[r]);
-			main_chart->addV(full_spectrum_max[r]);
+			main_chart->addV(full_spectrum_proc[r]);
+		}
 		else 
-			main_chart->addV(-100);
+			main_chart->addV(no_signal_value);
 		main_chart_freq->addV(full_frequencies[r]);			
 	}
 	fill_zoom_values();
@@ -251,6 +288,9 @@ void shared_mem_init()
 }
 
 int need_update_detector = 0;
+int last_scan_id = 0; //last scan ID that we processed
+float current_gain = 0;
+float centr_freq = 0;
 
 void load_scan_data()
 {
@@ -261,19 +301,28 @@ void load_scan_data()
 	float gain_mod = 0;//f_shm[3];
 	float gain_add = 10.0;
 	
-	float norm_avg_param = 0.97;
-	float max_mult_param = 1.01;
+	float norm_avg_param = 0.9;
+	float max_mult_param = 1.1;
 	int num_points = i_shm[4];
+	
+//	printf("loading %d points\n", num_points);
 	
 //	float len = num_points;
 	
-	float centr_freq = f_shm[5 + num_points];
-	int centr_pos = (centr_freq - full_sp_start_freq) / full_sp_freq_step;
+	centr_freq = f_shm[5 + num_points];
+//	int centr_pos = (centr_freq - full_sp_start_freq) / full_sp_freq_step;
+//	int fill_cp = (full_sp_min_filled_data + full_sp_max_filled_data)/2;
+//	if(centr_pos - fill_cp < 2000 && !need_update_detector) need_update_detector = 1;
+	if(!need_update_detector) need_update_detector = 1;
 	
-	int fill_cp = (full_sp_min_filled_data + full_sp_max_filled_data)/2;
-	if(centr_pos - fill_cp < 2000 && !need_update_detector) need_update_detector = 1;
-	
-	for(int r = num_points/4; r < 3*num_points/4; r++)
+	int min_point = num_points/4;
+	int max_point = 3*num_points/4;
+	if(num_points > 10000) //emulator case
+	{
+		min_point = 100;
+		max_point = num_points - 100;
+	}
+	for(int r = min_point; r < max_point; r++)
 	{
 		float freq = f_shm[5 + r*2];
 		float value = f_shm[6 + r*2];
@@ -289,6 +338,8 @@ void load_scan_data()
 			full_spectrum_avg[freq_pos] = value;
 			full_spectrum_avgZ[freq_pos] = 1.0;
 			full_spectrum_max[freq_pos] = value;
+			full_spectrum_gains[freq_pos] = current_gain;
+//			full_spectrum_proc[freq_pos] = full_spectrum_avg[freq_pos] / full_spectrum_avgZ[freq_pos];
 		}
 		else
 		{
@@ -296,14 +347,46 @@ void load_scan_data()
 			full_spectrum_avg[freq_pos] += (1.0 - norm_avg_param) * value;
 			full_spectrum_avgZ[freq_pos] = 1.0;
 			full_spectrum_max[freq_pos] *= max_mult_param;
+			full_spectrum_gains[freq_pos] = current_gain;
 			if(value > full_spectrum_max[freq_pos])
 				full_spectrum_max[freq_pos] = value;
+
+//			full_spectrum_proc[freq_pos] = full_spectrum_avg[freq_pos] / full_spectrum_avgZ[freq_pos];
 		}
+	}
+	for(int r = min_point; r < max_point; r++)
+	{
+		float freq = f_shm[5 + r*2];
+		if(r < 10 || r > num_points-10 || (r > num_points/2-4 && r < num_points/2+4)) continue;
+		int freq_pos = (freq - full_sp_start_freq) / full_sp_freq_step;
+
+		full_spectrum_proc[freq_pos] = 0;
+		float av_cnt = 0.0000001;
+		int window_size = 3;
+		for(int dp = -window_size; dp <= window_size; dp++)
+		{
+			if(full_spectrum_avgZ[freq_pos+dp] < 1) continue;
+			float window_func = sin(3.1415*(window_size + dp) / (2*window_size) );
+			av_cnt += window_func;
+			full_spectrum_proc[freq_pos] += window_func*(full_spectrum_avg[freq_pos+dp] / full_spectrum_avgZ[freq_pos+dp]);
+		}
+		full_spectrum_proc[freq_pos] /= av_cnt;
+		
+		full_spectrum_proc_wide[freq_pos] = 0;
+		av_cnt = 0.0000001;
+		window_size = 30;
+		for(int dp = -window_size; dp <= window_size; dp++)
+		{
+			if(full_spectrum_avgZ[freq_pos+dp] < 1) continue;
+			float window_func = sin(3.1415*(window_size + dp) / (2*window_size) );
+			av_cnt += window_func;
+			full_spectrum_proc_wide[freq_pos] += window_func*(full_spectrum_avg[freq_pos+dp] / full_spectrum_avgZ[freq_pos+dp]);
+		}
+		full_spectrum_proc_wide[freq_pos] /= av_cnt;
+		
 	}
 	fill_spectrum_data();
 }
-
-int last_scan_id = 0; //last scan ID that we processed
 
 void shared_mem_controller()
 {
@@ -313,8 +396,10 @@ void shared_mem_controller()
 		last_scan_id = ((int*)shared_memory)[0];
 	}
 	int *i_shm = (int*)shared_memory;
+	float *f_shm = (float*)shared_memory;
 	if(i_shm[0] != last_scan_id)
 	{
+		current_gain = f_shm[1];
 		load_scan_data();
 		last_scan_id = i_shm[0];
 	}
@@ -326,9 +411,10 @@ void clear_all_data()
 	i_shm[0] = 0;
 	for(int x = 0; x < full_sp_size; x++)
 	{
-		full_spectrum_avg[x] = -100;
+		full_spectrum_avg[x] = no_signal_value;
 		full_spectrum_avgZ[x] = 0.0000001;
-		full_spectrum_max[x] = -100;
+		full_spectrum_max[x] = no_signal_value;
+		full_spectrum_proc[x] = no_signal_value;
 	}
 	full_sp_max_filled_data = 0;
 	full_sp_min_filled_data = full_sp_size;
@@ -352,7 +438,7 @@ void draw_charts(uint8_t *draw_pix, int w, int h)
 	
 	//drawing axes:
 	//drawing grids:
-	for(float ygrid = -90; ygrid <= 0; ygrid += 10)
+	for(float ygrid = -120; ygrid <= 0; ygrid += 10)
 	{
 		int gy = main_chart->getValueY(ygrid);
 		if(gy < mby || gy >= mey) continue;
@@ -365,7 +451,7 @@ void draw_charts(uint8_t *draw_pix, int w, int h)
 			((unsigned int*)draw_pix)[gy*w + x] = 0xFFFFFF;
 		}
 	}
-	for(float ygrid = -90; ygrid <= 0; ygrid += 10)
+	for(float ygrid = -120; ygrid <= 0; ygrid += 10)
 	{
 		int gy = zoom_chart->getValueY(ygrid);
 		if(gy < zby || gy >= zey) continue;
@@ -440,8 +526,8 @@ void save_logs()
 	time_t rawtime;
 	time (&rawtime);
 	struct tm * curTm = localtime(&rawtime);
-	sprintf(logfn_full, "full_scan_y%d_m%d_d%d_h%d_m%d_s%d.csv", (2000+curTm->tm_year-100), curTm->tm_mon, curTm->tm_mday, curTm->tm_hour, curTm->tm_min, curTm->tm_sec);
-	sprintf(logfn_short, "short_scan_y%d_m%d_d%d_h%d_m%d_s%d.csv", (2000+curTm->tm_year-100), curTm->tm_mon, curTm->tm_mday, curTm->tm_hour, curTm->tm_min, curTm->tm_sec);
+	sprintf(logfn_full, "full_scan_y%d_m%d_d%d_h%d_m%d_s%d.csv", (2000+curTm->tm_year-100), curTm->tm_mon+1, curTm->tm_mday, curTm->tm_hour, curTm->tm_min, curTm->tm_sec);
+	sprintf(logfn_short, "short_scan_y%d_m%d_d%d_h%d_m%d_s%d.csv", (2000+curTm->tm_year-100), curTm->tm_mon+1, curTm->tm_mday, curTm->tm_hour, curTm->tm_min, curTm->tm_sec);
 	
 	int log_full = open(logfn_full, O_WRONLY | O_CREAT, 0b110110110);
 	char line[1024];
@@ -452,7 +538,7 @@ void save_logs()
 		if(full_spectrum_avgZ[r] > 0.5)
 			lng = sprintf(line, "%g;%g;%g\n", full_frequencies[r], full_spectrum_avg[r] / full_spectrum_avgZ[r], full_spectrum_max[r]);
 		else
-			lng = sprintf(line, "%g;%g;%g\n", full_frequencies[r], -100.0, -100.0);
+			lng = sprintf(line, "%g;%g;%g\n", full_frequencies[r], no_signal_value, no_signal_value);
 		int wlen = write(log_full, line, lng);
 		if(wlen != lng)
 			if(debug_print) printf("write error\n");
@@ -473,35 +559,6 @@ void save_logs()
 	close(log_short);		
 }
 
-sSignalDetector *detectors;
-
-void init_detectors()
-{
-	detectors = new sSignalDetector[detectors_count];
-	sprintf(detectors[0].name, "wide");
-	detectors[0].single_peak = 1;
-	detectors[0].standard_max_frequency_MHz = 99999;
-	detectors[0].standard_min_frequency_MHz = 0;
-	detectors[0].center_width_kHz = 7000;
-	detectors[0].left_shift_kHz = 7000;
-	detectors[0].left_width_kHz = 2000;
-	detectors[0].right_shift_kHz = 7000;
-	detectors[0].right_width_kHz = 2000;
-	detectors[0].left_relative_power = 0.0;
-	detectors[0].right_relative_power = 0.0;
-
-	sprintf(detectors[1].name, "narrow");
-	detectors[1].single_peak = 1;
-	detectors[1].standard_max_frequency_MHz = 99999;
-	detectors[1].standard_min_frequency_MHz = 0;
-	detectors[1].center_width_kHz = 300;
-	detectors[1].left_shift_kHz = 1550;
-	detectors[1].left_width_kHz = 1400;
-	detectors[1].right_shift_kHz = 1550;
-	detectors[1].right_width_kHz = 1400;
-	detectors[1].left_relative_power = 0.9;
-	detectors[1].right_relative_power = 0.9;
-}
 
 float freq_step_hz = 100000;
 
@@ -511,6 +568,7 @@ typedef struct sDetectedSignal
 	float central_frequency;
 	float BW;
 	float power;
+	float gain;
 }sDetectedSignal;
 #define MAX_DETECTIONS 10000
 sDetectedSignal detected_signals[MAX_DETECTIONS];
@@ -520,7 +578,7 @@ void clear_detected_signals()
 {
 	detected_signals_count = 0;
 }
-void add_detected_signal(int type, float center, float BW, float power)
+void add_detected_signal(int type, float center, float BW, float power, float gain)
 {
 	if(detected_signals_count >= MAX_DETECTIONS) return;
 	for(int s = 0; s < detected_signals_count; s++)
@@ -535,6 +593,7 @@ void add_detected_signal(int type, float center, float BW, float power)
 				detected_signals[s].central_frequency = center;
 				detected_signals[s].BW = BW;
 				detected_signals[s].power = power;
+				detected_signals[s].gain = gain;
 				return;
 			}
 			else
@@ -545,24 +604,60 @@ void add_detected_signal(int type, float center, float BW, float power)
 	detected_signals[detected_signals_count].central_frequency = center;
 	detected_signals[detected_signals_count].BW = BW;
 	detected_signals[detected_signals_count].power = power;
+	detected_signals[detected_signals_count].gain = gain;
 	detected_signals_count++;
 }
+
+int report_file = -1;
+
 void print_detected_signals()
 {
+	time_t rawtime;
+	time (&rawtime);
+	struct tm * curTm = localtime(&rawtime);
+	char rep_string[4096];
+	if(report_file < 0)
+	{
+		char rep_fname[4096];
+		sprintf(rep_fname, "report_y%d_m%d_d%d_h%02d_m%02d_s%02d.txt", (2000+curTm->tm_year-100), curTm->tm_mon+1, curTm->tm_mday, curTm->tm_hour, curTm->tm_min, curTm->tm_sec);
+	
+		report_file = open(rep_fname, O_WRONLY | O_CREAT, 0b110110110);
+	}
 	for(int s = 0; s < detected_signals_count; s++)
 //	if((detected_signals[s].type == 0 && detected_signals[s].BW > 4.5 ) || (detected_signals[s].type == 1 && detected_signals[s].BW < 5) )
 	{
-		printf("\ttype: %s F %.1f MHz P %.0f dBm BW %.1f MHz\n", detectors[detected_signals[s].type].name, detected_signals[s].central_frequency, detected_signals[s].power, detected_signals[s].BW);
+		int rep_len = sprintf(rep_string, "%02d:%02d:%02d : type: %s center %.1f MHz power %.0f dBm BW %.1f MHz gain %g\n", curTm->tm_hour, curTm->tm_min, curTm->tm_sec, detectors[detected_signals[s].type].name, detected_signals[s].central_frequency, detected_signals[s].power, detected_signals[s].BW, detected_signals[s].gain);
+		printf("%s", rep_string);
+		int wlen = write(report_file, rep_string, rep_len);
+		if(wlen < 0) printf("report file write error!\n");
 	}
 }
+void print_scan_frequency()
+{
+	if(report_file < 0) return;
+	time_t rawtime;
+	time (&rawtime);
+	struct tm * curTm = localtime(&rawtime);
+	char rep_string[4096];
+	int rep_len = sprintf(rep_string, "%02d:%02d:%02d : scanning %.1f MHz\n", curTm->tm_hour, curTm->tm_min, curTm->tm_sec, centr_freq*0.000001);
+	printf("%s", rep_string);
+	int wlen = write(report_file, rep_string, rep_len);
+	if(wlen < 0) printf("report file write error!\n");
+}
+
 
 void run_detectors()
 {
 	clear_detected_signals();
-	int has_detected = 0;
 	detector_chart->clear();
+	
+	float *sp_data = full_spectrum_proc;
 	for(int d = 0; d < detectors_count; d++)
 	{
+		if(d == 0)
+			sp_data = full_spectrum_proc_wide;
+		else
+			sp_data = full_spectrum_proc;
 		int dwidth = detectors[d].get_window_width_points(freq_step_hz);
 //		float df_min = detectors[d].get_min_freq();
 //		float df_max = detectors[d].get_max_freq();
@@ -570,177 +665,65 @@ void run_detectors()
 		{
 			float res_power = 0;
 			float res_bw = 0;
-			float det_level = detectors[d].process_data(full_spectrum_max + x, full_frequencies[x + dwidth/2], freq_step_hz, dwidth, &res_power, &res_bw);
+			float res_centroid = 0;
+			
+			float det_level = detectors[d].apply_detector(sp_data + x, full_frequencies[x], freq_step_hz, full_frequencies[x + dwidth/2], &res_power, &res_bw, &res_centroid);
 			int sp_idx = x + dwidth/2;
 			full_detector_res[full_sp_size*d + sp_idx] = det_level;
 			full_detector_power[full_sp_size*d + sp_idx] = res_power;
 			full_detector_bw[full_sp_size*d + sp_idx] = res_bw;
+			full_detector_centroid[full_sp_size*d + sp_idx] = res_centroid;
 //			printf("%g (%g - %g);%g;%g;%g\n", full_frequencies[x + dwidth/2], full_frequencies[x], full_frequencies[x+dwidth], det_level, res_power, res_bw);
 			if(0)if(fabs(full_frequencies[x + dwidth/2] - 2412500000) < 110000)
 			{
 				printf("Freq: %g, dwidth %d, dlvl %g, dpwr %g\n", full_frequencies[x + dwidth/2], dwidth, det_level, res_power);
 				for(int n = x + dwidth/2 - 100; n < x + dwidth/2 + 100; n++)
-					printf("%g\n", full_spectrum_max[n]);
+					printf("%g\n", sp_data[n]);
 			}
-			if(full_frequencies[x + dwidth/2] > 1200*1000000.0 && full_frequencies[x + dwidth/2] < 1265*1000000.0)
+			if(0)if(full_frequencies[x + dwidth/2] > 1200*1000000.0 && full_frequencies[x + dwidth/2] < 1265*1000000.0)
 			{
 //				printf("%g;%g;%g;%g\n", full_frequencies[x + dwidth/2], det_level, res_power, res_bw);
 				if(d==1)detector_chart->addV(det_level);
 			}
 		}
 	}
-	int loc_max_pos = 0;
-	int loc_max_length_right = 0;
-	int loc_max_length_left = 0;
-	int min_peak_length = 3; //don't even consider spikes as signal
-	int valid_peak_length = 6;
-	int valid_max_length = 300; //30MHz, anything more won't be considered as signal
-	float min_threshold = wide_threshold; //anything less won't be considered as a signal at all
-	float in_peak_threshold = 0.7;
-	float loc_max = 0;
-//	float loc_max_freq = 0;
-//	float loc_start_bw = 0;
-//	float loc_end_bw = 0;
+	float signal_threshold = -180;
 	for(int d = 0; d < detectors_count; d++)
 	{
-		if(d == 1) min_threshold = narrow_threshold; //strict rules for narrow filters
-		for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data; x++)
-	{
+		int dwidth = detectors[d].get_window_width_points(freq_step_hz);
 		
-		int didx = full_sp_size*d;
-		float dlvl = full_detector_res[didx + x];
-		if(dlvl > loc_max && full_detector_res[didx + x] > min_threshold)
+		float loc_max = 0;
+		int loc_max_pos = full_sp_min_filled_data;
+		for(int x = full_sp_min_filled_data; x < full_sp_max_filled_data - dwidth; x++)
 		{
-			loc_max = full_detector_res[didx + x];
-			loc_max_pos = x;
-//				loc_max_freq = full_frequencies[x];
-			loc_max_length_right = 0;
-			loc_max_length_left = 0;
-		}
-		if(dlvl > in_peak_threshold * loc_max)
-		{
-			loc_max_length_right++;
-		}
-		else
-		{
-			if(loc_max_length_right > min_peak_length)
+			int sp_idx = full_sp_size*d + x + dwidth/2;
+			loc_max *= 0.999;
+			float dv = full_detector_res[sp_idx];
+			if(dv > 0.3)
 			{
-				for(int y = loc_max_pos; y > 0; y--)
+				;
+//				printf("%d %.4f %g\n", sp_idx, 0.000001*full_frequencies[sp_idx - full_sp_size*d], dv);
+			}
+			if(dv > loc_max)
+			{
+				loc_max = dv;
+				loc_max_pos = sp_idx;
+//				printf("max = %d : %.4f a: %g\n", sp_idx, 0.000001*full_frequencies[sp_idx - full_sp_size*d], dv);
+			}
+			if(dv < loc_max * 0.9 && loc_max > 0.1)
+			{
+				if(full_detector_power[sp_idx] > signal_threshold)
 				{
-					if(full_detector_res[didx + y] < in_peak_threshold * loc_max) break;
-					loc_max_length_left++;
-				}
-				int lng = loc_max_length_left + loc_max_length_right;
-				if(lng >= valid_peak_length && lng < valid_max_length)
-				{
-					float center_freq = 0.5*(full_frequencies[loc_max_pos + loc_max_length_right] + full_frequencies[loc_max_pos - loc_max_length_left]) * 0.000001;
-					float sig_power = full_detector_power[didx + loc_max_pos];
-					float sig_bw = (full_frequencies[loc_max_pos + loc_max_length_right] - full_frequencies[loc_max_pos - loc_max_length_left])* 0.000001;
-					float avg_power = 0;
-					float max_power = -100;
-					float min_power = 0;
-					float avgZ = 0;
-					for(int px = loc_max_pos - loc_max_length_left; px < loc_max_pos + loc_max_length_right; px++)
-					{
-						if(full_spectrum_max[px] > max_power) max_power = full_spectrum_max[px];
-						if(full_spectrum_max[px] < min_power) min_power = full_spectrum_max[px];
-						avg_power += full_spectrum_max[px];
-						avgZ++;
-					}
-					avg_power /= avgZ;
-
-					sig_power = 0.7*avg_power + 0.3*max_power;
-
-					int bw_start = loc_max_pos - loc_max_length_left, bw_end = loc_max_pos + loc_max_length_right;
-					float sp_avgs = avg_power * 0.9;
-					for(int px = loc_max_pos; px < loc_max_pos + loc_max_length_right; px++)
-					{
-						sp_avgs *= 0.3;
-						sp_avgs += 0.7*full_spectrum_max[px];
-						if(sp_avgs < avg_power*1.05)
-						{
-							bw_end = px;
-							break;
-						}
-					}
-					sp_avgs = avg_power * 1.1;
-					for(int px = loc_max_pos+1; px > loc_max_pos - loc_max_length_left; px--)
-					{
-						sp_avgs *= 0.3;
-						sp_avgs += 0.7*full_spectrum_max[px];
-						if(sp_avgs < avg_power*1.05)
-						{
-							bw_start = px;
-							break;
-						}
-					}
-					
-					avg_power = 0;
-					max_power = -100;
-					min_power = 0;
-					avgZ = 0;
-					for(int px = bw_start; px < bw_end; px++)
-					{
-						if(full_spectrum_max[px] > max_power) max_power = full_spectrum_max[px];
-						if(full_spectrum_max[px] < min_power) min_power = full_spectrum_max[px];
-						avg_power += full_spectrum_max[px];
-						avgZ++;
-					}
-					avg_power /= avgZ;
-					sig_power = 0.7*avg_power + 0.3*max_power;
-					
-					float below_avg = 0;
-					for(int px = bw_start; px < bw_end; px++)
-						if(full_spectrum_max[px] < avg_power) below_avg += 1.0;
-					below_avg /= (float)(bw_end - bw_start);
-					
-					sig_bw = (full_frequencies[bw_end] - full_frequencies[bw_start])*0.000001;
-					center_freq = 0.5*(full_frequencies[bw_end] + full_frequencies[bw_start]) * 0.000001;
-					if(sig_bw > 0.5) sig_bw -= 0.2; //compensate for edge effects for too narrow bands
-					if(sig_bw > 0.6) sig_bw -= 0.2;
-
-					double pow_integr = 0.00000001;
-					double pow_high_05 = 0.00000001;
-					for(int px = bw_start; px < bw_end; px++)
-					{
-						pow_integr += pow(10.0, full_spectrum_max[px] * 0.1);
-						if(full_spectrum_max[px] > min_power + 0.5*(max_power - min_power))
-							pow_high_05 += pow(10.0, full_spectrum_max[px] * 0.1);
-					}
-
-					sig_power = 10.0 * log10(pow_integr);
-					float sig_power_high_05 = 10.0 * log10(pow_high_05);
-					
-					if(sig_power_high_05 < sig_power-3) continue; //too unequal power
-
-// 						if(sig_power > -80.0)
-					if(!has_detected)
-					{
-						printf("\nDetected signals:\n");
-						has_detected = 1;
-					}
-					//printf("F %.1f P %.0f BW %.1f sdv %g mm %g\n", center_freq, sig_power, sig_bw, power_sdv, max_power - min_power);
-					if(sig_power > -70 && below_avg < 0.7)
-					if((d == 0 && sig_bw > 4.5 ) || (d == 1 && sig_bw < 5) )
-					{
-						add_detected_signal(d, center_freq, sig_bw, sig_power);
-						//printf("\ttype: %s F %.1f MHz pow %g pow09 %g\n", detectors[d].name, center_freq, sig_power, sig_power_high_05);
-						
-					}
-//							printf("\ttype: %s F %.1f MHz P %.0f dBm BW %.1f MHz\n", detectors[d].name, center_freq, sig_power, sig_bw);
+//					add_detected_signal(d, 0.000001*full_frequencies[loc_max_pos - full_sp_size*d], 0.000001*full_detector_bw[loc_max_pos], full_detector_power[loc_max_pos]);
+					add_detected_signal(d, 0.000001*full_detector_centroid[loc_max_pos], 0.000001*full_detector_bw[loc_max_pos], full_detector_power[loc_max_pos], full_spectrum_gains[loc_max_pos - full_sp_size*d]);
 				}
 			}
-			loc_max = 0;
-			loc_max_length_left = 0;
-			loc_max_length_right = 0;
 		}
+		
 	}
+	print_detected_signals();
 	
-	}
-	if(!has_detected)
-		printf("\n no signals detected \n");
-	else
-		print_detected_signals();
+	return;
 }
 
 int main(int argc, char* argv[])
@@ -774,12 +757,13 @@ int main(int argc, char* argv[])
 	
 	int done = 0;
 	
-	timeval curTime, prevTime, zeroTime, detReqTime;
+	timeval curTime, prevTime, zeroTime, detReqTime, freq_log_time;
 	gettimeofday(&prevTime, NULL);
 	gettimeofday(&zeroTime, NULL);
 	
 	int mbtn_l, mbtn_r, mbtn_m;
 	int shift_pressed = 0, alt_pressed = 0;
+	int freq_log_state = 0;
 	if(debug_print) printf("starting main cycle\n");
 	while( !done ) 
 	{ 
@@ -926,23 +910,23 @@ int main(int argc, char* argv[])
 			detectors[1].center_width_kHz *= 0.999;
 		if(keys[SDL_SCANCODE_W])
 		{
-			detectors[1].left_shift_kHz *= 1.001;
-			detectors[1].right_shift_kHz *= 1.001;
+//			detectors[1].left_shift_kHz *= 1.001;
+//			detectors[1].right_shift_kHz *= 1.001;
 		}
 		if(keys[SDL_SCANCODE_S])
 		{
-			detectors[1].left_shift_kHz *= 0.999;
-			detectors[1].right_shift_kHz *= 0.999;
+//			detectors[1].left_shift_kHz *= 0.999;
+//			detectors[1].right_shift_kHz *= 0.999;
 		}
 		if(keys[SDL_SCANCODE_Z])
 		{
-			detectors[1].left_width_kHz *= 1.001;
-			detectors[1].right_width_kHz *= 1.001;
+			detectors[1].side_width_kHz *= 1.001;
+//			detectors[1].right_width_kHz *= 1.001;
 		}
 		if(keys[SDL_SCANCODE_X])
 		{
-			detectors[1].left_width_kHz *= 0.999;
-			detectors[1].right_width_kHz *= 0.999;
+			detectors[1].side_width_kHz *= 0.999;
+//			detectors[1].right_width_kHz *= 0.999;
 		}
 		
 
@@ -957,17 +941,28 @@ int main(int argc, char* argv[])
 			gettimeofday(&detReqTime, NULL);
 			need_update_detector = 2;
 		}
+		if(freq_log_state == 0)
+		{
+			gettimeofday(&freq_log_time, NULL);
+			freq_log_state = 1;
+		}
 		gettimeofday(&curTime, NULL);
 		int dT = (curTime.tv_sec - prevTime.tv_sec) * 1000000 + (curTime.tv_usec - prevTime.tv_usec);
 
 		if(need_update_detector == 2)
 		{
 			int det_dt = (curTime.tv_sec - detReqTime.tv_sec) * 1000000 + (curTime.tv_usec - detReqTime.tv_usec);
-			if(det_dt > 1000000)
+			if(det_dt > 5000000)
 			{
 				need_update_detector = 0;
 				run_detectors();
 			}
+		}
+		int freq_dt = (curTime.tv_sec - freq_log_time.tv_sec) * 1000000 + (curTime.tv_usec - freq_log_time.tv_usec);
+		if(freq_dt > 500000)
+		{
+			print_scan_frequency();
+			freq_log_state = 0;
 		}
 
 		memset(drawPix, 0, w*h*4);
@@ -1013,7 +1008,7 @@ int main(int argc, char* argv[])
 		
 		float mDT = 1000000.0 / (float)dT;
 		fps = fps*0.9 + 0.1*mDT;
-		sprintf(outstr, "fps %.0f cw %g lf %g lw %g", fps, detectors[1].center_width_kHz, detectors[1].left_shift_kHz, detectors[1].left_width_kHz);
+		sprintf(outstr, "fps %.0f G %g cw %g lf %g lw %g", fps, current_gain, detectors[1].center_width_kHz, 0.0, detectors[1].side_width_kHz);
 		msg = TTF_RenderText_Solid(font, outstr, textColor); 
 		mpos.x = 5; mpos.y = curY; curY += curDY;
 		mpos.w = msg->w; mpos.h = msg->h;
@@ -1034,7 +1029,7 @@ int main(int argc, char* argv[])
 		int mby = main_chart->getY();
 		int mey = main_chart->getY() + main_chart->getSizeY();
 		
-		for(float ygrid = -90; ygrid <= 0; ygrid += 10)
+		for(float ygrid = -120; ygrid <= 0; ygrid += 10)
 		{
 			int gy = main_chart->getValueY(ygrid);
 			if(gy < mby || gy > mey) continue;
@@ -1049,7 +1044,7 @@ int main(int argc, char* argv[])
 			SDL_FreeSurface(msg);
 			SDL_DestroyTexture(txt);
 		}
-		for(float ygrid = -90; ygrid <= 0; ygrid += 10)
+		for(float ygrid = -120; ygrid <= 0; ygrid += 10)
 		{
 			int gy = zoom_chart->getValueY(ygrid);
 			if(gy < zby || gy > zey) continue;
@@ -1104,6 +1099,7 @@ int main(int argc, char* argv[])
 		
 		SDL_RenderPresent(renderer);
 	}
+	close(report_file);
 	free(drawPix);
 	TTF_CloseFont( font ); 
 	TTF_Quit();
